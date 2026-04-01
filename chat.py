@@ -28,7 +28,7 @@ When providing code examples, format them properly. Be friendly and professional
 
 
 def reset_conversation():
-    return []
+    return [], ""
 
 
 def generate_response(
