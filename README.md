@@ -1,3 +1,5 @@
+<!-- Author: Dhiren Kumar Singh -->
+
 # Chatter - AI Chat Application
 
 A Gradio-based chat application powered by Amazon Bedrock (Llama, Mistral models).
