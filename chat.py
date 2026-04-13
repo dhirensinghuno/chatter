@@ -6,12 +6,29 @@ import boto3
 import json
 import gradio as gr
 import os
+import re
 from typing import Iterator
 from dotenv import load_dotenv
 
 load_dotenv()
 
 MODEL_ID = "us.meta.llama3-1-70b-instruct-v1:0"
+
+GUARDRAILS_ENABLED = os.getenv("GUARDRAILS_ENABLED", "true").lower() == "true"
+MAX_REASK_ATTEMPTS = 3
+
+DENIED_PATTERNS = [
+    r"\b(password|secret|api.?key)\s*[:=]\s*\S+",
+    r"\b\d{3}-\d{2}-\d{4}\b",
+    r"\b\d{16}\b",
+]
+
+SYSTEM_PROMPT_GUARDRAILS = """You are a content safety validator. Evaluate if the provided text is safe, appropriate, and does not contain:
+- Personal Identifiable Information (PII) like SSN, credit card numbers
+- Secrets, passwords, or API keys
+- Harmful, illegal, or disallowed content
+
+Respond with ONLY "PASS" if the content is safe, or "FAIL: <reason>" if there are concerns."""
 
 aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID")
 aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY")
@@ -27,6 +44,124 @@ if aws_access_key_id and aws_secret_access_key:
     )
 
 
+def validate_with_guardrails(text: str) -> tuple[bool, str]:
+    """
+    Validate LLM output for safety and policy compliance.
+
+    Guardrails AI Step 3: Validate the output using pattern matching and LLM-based validation.
+
+    Args:
+        text: The raw output from the LLM to validate.
+
+    Returns:
+        A tuple of (is_valid, feedback_message).
+        - is_valid: True if content passes all checks, False otherwise.
+        - feedback_message: Empty string if valid, or reason for failure if invalid.
+    """
+    if not GUARDRAILS_ENABLED:
+        return True, ""
+
+    for pattern in DENIED_PATTERNS:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return False, f"Detected sensitive pattern: {match.group(0)}"
+
+    if bedrock is None:
+        return True, ""
+
+    validation_prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+{SYSTEM_PROMPT_GUARDRAILS}<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Evaluate this content:
+{text[:2000]}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+"""
+
+    try:
+        body = json.dumps(
+            {
+                "prompt": validation_prompt,
+                "temperature": 0.1,
+                "top_p": 0.9,
+                "max_gen_len": 50,
+            }
+        )
+
+        response = bedrock.invoke_model(
+            body=body,
+            modelId=MODEL_ID,
+            accept="application/json",
+            contentType="application/json",
+        )
+
+        result = json.loads(response["body"].read().decode())
+        validation_text = result.get("generation", "").strip().upper()
+
+        if validation_text.startswith("FAIL"):
+            reason = (
+                validation_text[4:].strip()
+                if len(validation_text) > 4
+                else "Content policy violation"
+            )
+            return False, f"LLM guardrail: {reason}"
+
+        return True, ""
+    except Exception:
+        return True, ""
+
+
+def parse_llm_output(raw_output: str) -> str:
+    """
+    Parse and clean LLM raw output.
+
+    Guardrails AI Step 2: Parse the output by removing markdown code block artifacts.
+
+    Args:
+        raw_output: The raw streaming output from the LLM.
+
+    Returns:
+        Cleaned text with markdown code blocks stripped.
+    """
+    cleaned = raw_output.strip()
+    cleaned = re.sub(r"^```\w*\n?", "", cleaned)
+    cleaned = re.sub(r"\n?```$", "", cleaned)
+    return cleaned
+
+
+def reask_with_modified_prompt(
+    original_message: str,
+    history: list,
+    system_prompt: str,
+    model_id: str,
+    guardrail_feedback: str,
+    attempt: int = 0,
+) -> Iterator[str]:
+    """
+    Reask the LLM with modified prompt incorporating guardrail feedback.
+
+    Guardrails AI Step 4: Reask if necessary - regenerate response with safety guidance.
+
+    Args:
+        original_message: The original user message.
+        history: Conversation history for context.
+        system_prompt: System prompt for the model.
+        model_id: The Bedrock model identifier.
+        guardrail_feedback: Feedback from validation failure.
+        attempt: Current attempt number (tracks reask count).
+
+    Yields:
+        Response chunks from the LLM with modified prompt.
+    """
+    modified_message = f"""{original_message}
+
+[AI Safety System Note: Please revise your response. Previous response had concerns: {guardrail_feedback}]"""
+
+    yield from generate_response(
+        modified_message, history, system_prompt, model_id, attempt + 1
+    )
+
+
 SYSTEM_PROMPT = """You are a helpful AI assistant. Provide clear, concise, and useful answers.
 When providing code examples, format them properly. Be friendly and professional."""
 
@@ -36,7 +171,7 @@ def reset_conversation():
 
 
 def generate_response(
-    message: str, history: list, system_prompt: str, model_id: str
+    message: str, history: list, system_prompt: str, model_id: str, attempt: int = 0
 ) -> Iterator[str]:
     global bedrock
     if bedrock is None:
@@ -103,33 +238,48 @@ def generate_response(
             contentType="application/json",
         )
 
+        raw_output = ""
         stream = response.get("body")
         if stream:
             for event in stream:
                 chunk = json.loads(event["chunk"]["bytes"])
+                chunk_text = ""
                 if (
                     "anthropic" in model_id
                     and chunk.get("type") == "content_block_delta"
                 ):
-                    yield chunk.get("delta", {}).get("text", "")
+                    chunk_text = chunk.get("delta", {}).get("text", "")
                 elif "llama" in model_id:
                     if "generation" in chunk:
-                        yield chunk.get("generation", "")
+                        chunk_text = chunk.get("generation", "")
                 elif "mistral" in model_id:
                     if "outputs" in chunk:
                         for output in chunk["outputs"]:
-                            yield output.get("text", "")
+                            chunk_text += output.get("text", "")
                     elif "token" in chunk:
-                        yield chunk.get("token", {}).get("text", "")
+                        chunk_text = chunk.get("token", {}).get("text", "")
                 elif "amazon" in model_id:
-                    yield chunk.get("outputText", "")
+                    chunk_text = chunk.get("outputText", "")
+                raw_output += chunk_text
+                yield chunk_text
+
+        parsed_output = parse_llm_output(raw_output)
+        is_valid, feedback = validate_with_guardrails(parsed_output)
+
+        if not is_valid and attempt < MAX_REASK_ATTEMPTS:
+            yield from reask_with_modified_prompt(
+                message, history, system_prompt, model_id, feedback, attempt
+            )
+
     except Exception as e:
         error_msg = str(e)
         yield f"Error: {error_msg}"
 
 
 def build_ui():
-    with gr.Blocks(title="Chatter",         css="""
+    with gr.Blocks(
+        title="Chatter",
+        css="""
         #message-input textarea {
             font-size: 16px !important;
             border-radius: 12px !important;
@@ -140,7 +290,8 @@ def build_ui():
             border-color: #007bff !important;
             box-shadow: 0 0 0 3px rgba(0,123,255,0.2) !important;
         }
-    """) as app:
+    """,
+    ) as app:
         gr.Markdown("# Chatter")
 
         with gr.Accordion("Settings", open=False, visible=False):
