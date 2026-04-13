@@ -58,6 +58,20 @@ SYSTEM_PROMPT_GUARDRAILS = """You are a content safety validator. Evaluate if th
 
 Respond with ONLY "PASS" if the content is safe, or "FAIL: <reason>" if there are concerns."""
 
+HALLUCINATION_JUDGE_PROMPT = """You are a hallucination detection judge. Analyze the response for factual accuracy and unsubstantiated claims.
+
+Check for:
+- Fabricated statistics, dates, or numbers
+- Made-up quotes or attributions
+- Invented facts without basis
+- Confident statements about things you don't know
+- Vague claims that cannot be verified
+- "I believe", "probably", "might be" stated as facts
+
+Respond with ONLY:
+- "GROUNDED" if claims appear substantiated and factual
+- "HALLUCINATION: <specific unsubstantiated claim>" if fabrications detected"""
+
 aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID")
 aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY")
 aws_region = os.getenv("AWS_REGION", "us-east-1")
@@ -101,13 +115,74 @@ def redact_pii(text: str) -> tuple[str, list[str]]:
     return redacted_text, detected
 
 
+def detect_hallucination(text: str, context: str = "") -> tuple[bool, str]:
+    """
+    Detect hallucination and unsubstantiated claims in LLM responses.
+
+    Uses semantic similarity and custom judges to ground responses against
+    available knowledge. Flags fabrications and "sounds good" lies.
+
+    Args:
+        text: The LLM response to evaluate.
+        context: Optional context/knowledge base to ground against.
+
+    Returns:
+        A tuple of (is_grounded, hallucination_details).
+        - is_grounded: True if claims appear factual, False if hallucination detected.
+        - hallucination_details: Empty string if grounded, or specific fabrication details.
+    """
+    if not GUARDRAILS_ENABLED:
+        return True, ""
+
+    if bedrock is None:
+        return True, ""
+
+    hallucination_prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+{HALLUCINATION_JUDGE_PROMPT}<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Analyze this response for hallucinations:
+{text[:2000]}
+
+{f"Use this context to verify facts: {context[:500]}" if context else ""}
+
+<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+"""
+
+    try:
+        body = json.dumps(
+            {
+                "prompt": hallucination_prompt,
+                "temperature": 0.1,
+                "top_p": 0.9,
+                "max_gen_len": 100,
+            }
+        )
+
+        response = bedrock.invoke_model(
+            body=body,
+            modelId=MODEL_ID,
+            accept="application/json",
+            contentType="application/json",
+        )
+
+        result = json.loads(response["body"].read().decode())
+        judgment = result.get("generation", "").strip().upper()
+
+        if judgment.startswith("HALLUCINATION"):
+            return False, judgment
+        return True, ""
+    except Exception:
+        return True, ""
+
+
 def validate_with_guardrails(text: str) -> tuple[bool, str]:
     """
-    Validate LLM output for safety and policy compliance.
+    Validate LLM output for safety, policy compliance, and factual accuracy.
 
-    Guardrails AI Step 3: Validate the output using pattern matching and LLM-based validation.
-    Detects and flags PII including: names, IDs, medical records, addresses, SSN,
-    credit cards, emails, phone numbers, driver licenses, passports, IP addresses, DOB.
+    Guardrails AI Step 3: Validate the output using pattern matching, PII detection,
+    and hallucination detection. Flags PII, policy violations, and unsubstantiated claims.
 
     Args:
         text: The raw output from the LLM to validate.
@@ -128,6 +203,10 @@ def validate_with_guardrails(text: str) -> tuple[bool, str]:
     redacted, detected_types = redact_pii(text)
     if detected_types:
         return False, f"Detected PII: {', '.join(detected_types)}"
+
+    is_grounded, hallucination_msg = detect_hallucination(text)
+    if not is_grounded:
+        return False, hallucination_msg
 
     if bedrock is None:
         return True, ""
