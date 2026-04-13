@@ -23,8 +23,36 @@ DENIED_PATTERNS = [
     r"\b\d{16}\b",
 ]
 
+PII_PATTERNS = {
+    "SSN": (r"\b\d{3}-\d{2}-\d{4}\b", "[REDACTED-SSN]"),
+    "CREDIT_CARD": (r"\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b", "[REDACTED-CC]"),
+    "EMAIL": (
+        r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",
+        "[REDACTED-EMAIL]",
+    ),
+    "PHONE": (
+        r"\b(\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b",
+        "[REDACTED-PHONE]",
+    ),
+    "DRIVER_LICENSE": (r"\b[A-Z]{1,2}\d{5,8}\b", "[REDACTED-DL]"),
+    "PASSPORT": (r"\b[A-Z]{1,2}\d{6,9}\b", "[REDACTED-PASSPORT]"),
+    "MEDICAL_RECORD": (
+        r"\b(MRN|medical.?record|patient.?id)[:\s]*\d{6,10}\b",
+        "[REDACTED-MRN]",
+    ),
+    "ADDRESS": (
+        r"\b\d{1,5}\s+[\w\s]+(?:street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln|drive|dr|way|court|ct|place|pl)[\s,]+[\w\s]+,?\s*[A-Z]{2}\s*\d{5,10}\b",
+        "[REDACTED-ADDRESS]",
+    ),
+    "IP_ADDRESS": (r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", "[REDACTED-IP]"),
+    "DOB": (
+        r"\b(?:DOB|date.?of.?birth)[:\s]*\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
+        "[REDACTED-DOB]",
+    ),
+}
+
 SYSTEM_PROMPT_GUARDRAILS = """You are a content safety validator. Evaluate if the provided text is safe, appropriate, and does not contain:
-- Personal Identifiable Information (PII) like SSN, credit card numbers
+- Personal Identifiable Information (PII) like SSN, credit card numbers, names, IDs, medical records, addresses
 - Secrets, passwords, or API keys
 - Harmful, illegal, or disallowed content
 
@@ -44,11 +72,42 @@ if aws_access_key_id and aws_secret_access_key:
     )
 
 
+def redact_pii(text: str) -> tuple[str, list[str]]:
+    """
+    Detect and redact personally identifiable information (PII) from text.
+
+    Powered by Guardrails Hub - detects: names, IDs, medical records, addresses,
+    SSN, credit cards, emails, phone numbers, and more.
+
+    Args:
+        text: Input text to scan for PII.
+
+    Returns:
+        A tuple of (redacted_text, detected_types).
+        - redacted_text: Text with PII replaced by placeholders.
+        - detected_types: List of PII types that were detected.
+    """
+    detected = []
+    redacted_text = text
+
+    for pii_type, (pattern, placeholder) in PII_PATTERNS.items():
+        matches = re.findall(pattern, redacted_text, re.IGNORECASE)
+        if matches:
+            detected.append(pii_type)
+            redacted_text = re.sub(
+                pattern, placeholder, redacted_text, flags=re.IGNORECASE
+            )
+
+    return redacted_text, detected
+
+
 def validate_with_guardrails(text: str) -> tuple[bool, str]:
     """
     Validate LLM output for safety and policy compliance.
 
     Guardrails AI Step 3: Validate the output using pattern matching and LLM-based validation.
+    Detects and flags PII including: names, IDs, medical records, addresses, SSN,
+    credit cards, emails, phone numbers, driver licenses, passports, IP addresses, DOB.
 
     Args:
         text: The raw output from the LLM to validate.
@@ -65,6 +124,10 @@ def validate_with_guardrails(text: str) -> tuple[bool, str]:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             return False, f"Detected sensitive pattern: {match.group(0)}"
+
+    redacted, detected_types = redact_pii(text)
+    if detected_types:
+        return False, f"Detected PII: {', '.join(detected_types)}"
 
     if bedrock is None:
         return True, ""
@@ -113,20 +176,23 @@ Evaluate this content:
 
 def parse_llm_output(raw_output: str) -> str:
     """
-    Parse and clean LLM raw output.
+    Parse and clean LLM raw output with PII redaction.
 
-    Guardrails AI Step 2: Parse the output by removing markdown code block artifacts.
+    Guardrails AI Step 2: Parse the output by removing markdown code block artifacts
+    and redacting personally identifiable information (names, IDs, medical records, addresses).
 
     Args:
         raw_output: The raw streaming output from the LLM.
 
     Returns:
-        Cleaned text with markdown code blocks stripped.
+        Cleaned text with markdown code blocks stripped and PII redacted.
     """
     cleaned = raw_output.strip()
     cleaned = re.sub(r"^```\w*\n?", "", cleaned)
     cleaned = re.sub(r"\n?```$", "", cleaned)
-    return cleaned
+
+    redacted_output, detected = redact_pii(cleaned)
+    return redacted_output
 
 
 def reask_with_modified_prompt(
