@@ -10,12 +10,32 @@ import re
 from typing import Iterator
 from dotenv import load_dotenv
 
+try:
+    from guardrails import Guard
+    from guardrails.hub import ProfanityFree, ToxicLanguage, SensitiveData
+    from rich.console import Console
+
+    GUARDRAILS_AI_AVAILABLE = True
+except ImportError:
+    GUARDRAILS_AI_AVAILABLE = False
+
 load_dotenv()
 
 MODEL_ID = "us.meta.llama3-1-70b-instruct-v1:0"
 
 GUARDRAILS_ENABLED = os.getenv("GUARDRAILS_ENABLED", "true").lower() == "true"
 MAX_REASK_ATTEMPTS = 3
+
+guard = None
+if GUARDRAILS_AI_AVAILABLE and GUARDRAILS_ENABLED:
+    try:
+        guard = Guard().use_many(
+            ProfanityFree,
+            ToxicLanguage,
+        )
+        console = Console()
+    except Exception:
+        guard = None
 
 DENIED_PATTERNS = [
     r"\b(password|secret|api.?key)\s*[:=]\s*\S+",
@@ -182,7 +202,8 @@ def validate_with_guardrails(text: str) -> tuple[bool, str]:
     Validate LLM output for safety, policy compliance, and factual accuracy.
 
     Guardrails AI Step 3: Validate the output using pattern matching, PII detection,
-    and hallucination detection. Flags PII, policy violations, and unsubstantiated claims.
+    hallucination detection, and guardrails-ai package. Flags PII, policy violations,
+    toxic language, profanity, and unsubstantiated claims.
 
     Args:
         text: The raw output from the LLM to validate.
@@ -194,6 +215,19 @@ def validate_with_guardrails(text: str) -> tuple[bool, str]:
     """
     if not GUARDRAILS_ENABLED:
         return True, ""
+
+    if guard is not None:
+        try:
+            validated_response = guard.parse(text)
+            if validated_response.validation_passed:
+                pass
+            else:
+                return (
+                    False,
+                    f"Guardrails AI violation: {validated_response.reask_responses}",
+                )
+        except Exception:
+            pass
 
     for pattern in DENIED_PATTERNS:
         match = re.search(pattern, text, re.IGNORECASE)
