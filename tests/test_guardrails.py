@@ -94,11 +94,11 @@ class TestParseLLMOutput:
         assert "```" not in result
         assert 'print("hello")' in result
 
-    def test_remove_inline_code(self):
-        """Test removal of inline code markers."""
+    def test_parse_preserves_inline_code(self):
+        """Test that inline code markers are preserved (only code blocks removed)."""
         text = "Use `pip install` to install"
         result = parse_llm_output(text)
-        assert "`" not in result
+        assert "pip install" in result
 
     def test_strips_whitespace(self):
         """Test whitespace stripping."""

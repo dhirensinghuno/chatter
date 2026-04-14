@@ -51,7 +51,7 @@ PII_PATTERNS = {
         "[REDACTED-EMAIL]",
     ),
     "PHONE": (
-        r"\b(\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b",
+        r"\+?\d{1,4}[\s.-]?\(?\d{2,4}\)?[\s.-]?\d{3,4}[\s.-]?\d{3,4}",
         "[REDACTED-PHONE]",
     ),
     "DRIVER_LICENSE": (r"\b[A-Z]{1,2}\d{5,8}\b", "[REDACTED-DL]"),
