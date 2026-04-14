@@ -2,7 +2,7 @@
 
 # Chatter - AI Chat Application
 
-A Gradio-based chat application powered by Amazon Bedrock (Llama, Mistral models).
+A Gradio-based chat application powered by Amazon Bedrock (Llama, Mistral models) with **Guardrails AI** for enterprise-grade output safety.
 
 ## Setup
 
@@ -43,11 +43,62 @@ Open http://localhost:7861 in your browser.
 
 ## Features
 
-- Streaming responses
-- Conversation history (persists during session)
-- Multiple model support (Llama 3 70B, Llama 3 8B, Mistral Large)
-- Customizable system prompt
-- Clean, modern UI
+- **Streaming responses** - Real-time LLM output
+- **Conversation history** - Persists during session
+- **Multiple model support** - Llama 3 70B, Llama 3 8B, Mistral Large
+- **Customizable system prompt**
+- **Clean, modern UI**
+
+## Guardrails AI
+
+Enterprise-grade safety features powered by Guardrails Hub:
+
+### Guardrails Pipeline
+The application follows a 4-step guardrails workflow:
+1. **Call LLM** - Generate response from Bedrock model
+2. **Parse Output** - Clean and normalize the response
+3. **Validate Output** - Check for policy violations
+4. **Reask if Necessary** - Regenerate with feedback (max 3 attempts)
+
+### PII Detection & Redaction
+Automatically detects and redacts personally identifiable information:
+- SSN (Social Security Numbers)
+- Credit Card Numbers
+- Email Addresses
+- Phone Numbers
+- Driver Licenses & Passports
+- Medical Record Numbers (MRN)
+- Physical Addresses
+- IP Addresses
+- Date of Birth
+
+### Hallucination Detection
+Grounds responses against factual accuracy:
+- Detects fabricated statistics and numbers
+- Flags made-up quotes and attributions
+- Identifies invented facts
+- Catches "sounds good" lies presented as facts
+
+### Content Safety Validation
+Uses multiple validation layers:
+- Pattern-based detection for secrets and keys
+- Guardrails AI package (`ProfanityFree`, `ToxicLanguage`)
+- LLM-based content policy validation
+
+### Configuration
+Guardrails are enabled by default. Toggle via environment variable:
+```bash
+GUARDRAILS_ENABLED=false  # Disable guardrails
+GUARDRAILS_ENABLED=true   # Enable guardrails (default)
+```
+
+## Testing
+
+Run unit tests:
+```bash
+pip install pytest
+pytest tests/ -v
+```
 
 ## Troubleshooting
 
@@ -60,3 +111,7 @@ Open http://localhost:7861 in your browser.
 
 **Error: "Malformed input request"**
 - Ensure you're using correct request format for each model
+
+**Guardrails not working**
+- Ensure `guardrails-ai` and `rich` packages are installed
+- Check `GUARDRAILS_ENABLED=true` in environment
